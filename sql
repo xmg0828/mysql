@@ -22,11 +22,32 @@ show_menu() {
     echo -e "${BLUE}=====================================${NC}"
 }
 
-install_backup() {
-    echo -e "${YELLOW}开始安装...${NC}"
+detect_mysql() {
+    IS_DOCKER=false
+    MYSQL_CONTAINER=""
     
-    if ! command -v mysql &> /dev/null; then
-        echo -e "${RED}错误: 未检测到MySQL${NC}"
+    if command -v docker &> /dev/null; then
+        MYSQL_CONTAINER=$(docker ps --format "{{.Names}}" | grep -i mysql | head -1)
+        if [ -n "$MYSQL_CONTAINER" ]; then
+            IS_DOCKER=true
+            echo -e "${GREEN}检测到Docker MySQL容器: $MYSQL_CONTAINER${NC}"
+            return 0
+        fi
+    fi
+    
+    if command -v mysql &> /dev/null; then
+        echo -e "${GREEN}检测到本地MySQL${NC}"
+        return 0
+    fi
+    
+    echo -e "${RED}错误: 未检测到MySQL${NC}"
+    return 1
+}
+
+install_backup() {
+    echo -e "${YELLOW}开始安装自动备份...${NC}\n"
+    
+    if ! detect_mysql; then
         exit 1
     fi
     
@@ -36,10 +57,35 @@ install_backup() {
     echo ""
     read -p "保留天数 [7]: " DAYS
     DAYS=${DAYS:-7}
-    read -p "每天几点备份 [2]: " HOUR
+    read -p "每天几点备份(0-23) [2]: " HOUR
     HOUR=${HOUR:-2}
     
-    cat > /usr/local/bin/mysql-backup << EOFSCRIPT
+    if [ "$IS_DOCKER" = true ]; then
+        cat > /usr/local/bin/mysql-backup << EOFSCRIPT
+#!/bin/bash
+USER="$USER"
+PASS="$PASS"
+DIR="/var/backups/mysql"
+DAYS=$DAYS
+CONTAINER="$MYSQL_CONTAINER"
+
+mkdir -p "\$DIR"
+FILE="\$DIR/backup_\$(date +%Y%m%d_%H%M%S).sql"
+
+docker exec \$CONTAINER mysqldump -u "\$USER" -p"\$PASS" --all-databases > "\$FILE" 2>/dev/null
+
+if [ \$? -eq 0 ] && [ -s "\$FILE" ]; then
+    gzip "\$FILE"
+    echo "备份成功: \${FILE}.gz"
+    find "\$DIR" -name "*.sql.gz" -mtime +\$DAYS -delete
+else
+    echo "备份失败"
+    rm -f "\$FILE"
+    exit 1
+fi
+EOFSCRIPT
+    else
+        cat > /usr/local/bin/mysql-backup << EOFSCRIPT
 #!/bin/bash
 USER="$USER"
 PASS="$PASS"
@@ -65,27 +111,30 @@ else
     exit 1
 fi
 EOFSCRIPT
-
+    fi
+    
     chmod +x /usr/local/bin/mysql-backup
     chmod 600 /usr/local/bin/mysql-backup
     
     (crontab -l 2>/dev/null | grep -v mysql-backup; echo "0 $HOUR * * * /usr/local/bin/mysql-backup >> /var/log/mysql-backup.log 2>&1") | crontab -
     
-    echo -e "${GREEN}✓ 安装完成${NC}"
-    echo "每天 ${HOUR}:00 自动备份"
+    echo -e "\n${GREEN}✓ 安装完成${NC}"
+    echo -e "${YELLOW}每天 ${HOUR}:00 自动备份${NC}"
+    echo -e "${YELLOW}备份目录: /var/backups/mysql${NC}"
     
-    read -p "立即测试? [Y/n]: " TEST
+    read -p "立即测试备份? [Y/n]: " TEST
     if [[ ! "$TEST" =~ ^[Nn]$ ]]; then
         /usr/local/bin/mysql-backup
     fi
 }
 
 backup_now() {
-    echo -e "${YELLOW}正在备份...${NC}"
+    echo -e "${YELLOW}正在备份...${NC}\n"
+    
     if [ -f /usr/local/bin/mysql-backup ]; then
         /usr/local/bin/mysql-backup
     else
-        echo -e "${RED}请先安装${NC}"
+        echo -e "${RED}请先安装(选项1)${NC}"
     fi
 }
 
@@ -97,12 +146,17 @@ restore_db() {
         return
     fi
     
-    echo -e "${YELLOW}可用备份:${NC}"
+    if ! detect_mysql; then
+        return
+    fi
+    
+    echo -e "${YELLOW}可用备份:${NC}\n"
     files=($DIR/backup_*.sql.gz)
     for i in "${!files[@]}"; do
         name=$(basename "${files[$i]}")
         size=$(du -h "${files[$i]}" | cut -f1)
-        echo "$((i+1)). $name ($size)"
+        time=$(stat -c %y "${files[$i]}" | cut -d. -f1)
+        echo "$((i+1)). $name ($size) - $time"
     done
     
     echo ""
@@ -111,27 +165,31 @@ restore_db() {
     if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#files[@]}" ]; then
         file="${files[$((choice-1))]}"
         
-        echo -e "${RED}警告: 将覆盖所有数据${NC}"
-        read -p "输入YES确认: " confirm
+        echo -e "\n${RED}警告: 将覆盖所有数据库！${NC}"
+        read -p "确认恢复? 输入YES: " confirm
         
         if [ "$confirm" = "YES" ]; then
             read -sp "MySQL密码: " PASS
             echo ""
-            echo "恢复中..."
+            echo -e "${YELLOW}正在恢复...${NC}"
             
-            if [ -z "$PASS" ]; then
-                gunzip < "$file" | mysql
+            if [ "$IS_DOCKER" = true ]; then
+                gunzip < "$file" | docker exec -i $MYSQL_CONTAINER mysql -u root -p"$PASS" 2>/dev/null
             else
-                gunzip < "$file" | mysql -p"$PASS"
+                if [ -z "$PASS" ]; then
+                    gunzip < "$file" | mysql
+                else
+                    gunzip < "$file" | mysql -p"$PASS"
+                fi
             fi
             
             if [ $? -eq 0 ]; then
-                echo -e "${GREEN}✓ 恢复成功${NC}"
+                echo -e "${GREEN}✓ 恢复成功！${NC}"
             else
                 echo -e "${RED}✗ 恢复失败${NC}"
             fi
         else
-            echo "已取消"
+            echo -e "${YELLOW}已取消${NC}"
         fi
     else
         echo -e "${RED}无效选择${NC}"
@@ -140,17 +198,53 @@ restore_db() {
 
 list_backups() {
     DIR="/var/backups/mysql"
-    echo -e "${YELLOW}备份列表:${NC}"
-    ls -lh $DIR/*.sql.gz 2>/dev/null || echo "无备份"
+    
+    if [ ! -d "$DIR" ]; then
+        echo -e "${RED}备份目录不存在${NC}"
+        return
+    fi
+    
+    echo -e "${YELLOW}备份文件列表:${NC}\n"
+    
+    files=($DIR/backup_*.sql.gz)
+    
+    if [ ${#files[@]} -eq 0 ] || [ ! -e "${files[0]}" ]; then
+        echo -e "${RED}没有备份文件${NC}"
+        return
+    fi
+    
+    total=0
+    for file in "${files[@]}"; do
+        name=$(basename "$file")
+        size=$(du -h "$file" | cut -f1)
+        bytes=$(du -b "$file" | cut -f1)
+        time=$(stat -c %y "$file" | cut -d. -f1)
+        echo "📦 $name"
+        echo "   大小: $size | 时间: $time"
+        echo ""
+        total=$((total + bytes))
+    done
+    
+    total_mb=$(echo $total | awk '{printf "%.2f MB", $1/1024/1024}')
+    echo -e "${YELLOW}总计: ${#files[@]} 个文件, 共 $total_mb${NC}"
 }
 
 check_cron() {
-    echo -e "${YELLOW}定时任务:${NC}"
+    echo -e "${YELLOW}定时任务状态:${NC}\n"
+    
     if crontab -l 2>/dev/null | grep -q mysql-backup; then
-        echo -e "${GREEN}✓ 已启用${NC}"
+        echo -e "${GREEN}✓ 定时任务已启用${NC}\n"
+        echo "当前设置:"
         crontab -l | grep mysql-backup
+        echo ""
+        echo -e "${YELLOW}最近的备份日志:${NC}"
+        if [ -f /var/log/mysql-backup.log ]; then
+            tail -n 10 /var/log/mysql-backup.log
+        else
+            echo "暂无日志"
+        fi
     else
-        echo -e "${RED}✗ 未设置${NC}"
+        echo -e "${RED}✗ 定时任务未设置${NC}"
     fi
 }
 
@@ -165,13 +259,13 @@ main() {
         read -p "选择 [0-5]: " choice
         
         case $choice in
-            1) install_backup; read -p "回车继续..." ;;
-            2) backup_now; read -p "回车继续..." ;;
-            3) restore_db; read -p "回车继续..." ;;
-            4) list_backups; read -p "回车继续..." ;;
-            5) check_cron; read -p "回车继续..." ;;
-            0) echo "再见"; exit 0 ;;
-            *) echo -e "${RED}无效${NC}"; sleep 1 ;;
+            1) install_backup; read -p "按回车继续..." ;;
+            2) backup_now; read -p "按回车继续..." ;;
+            3) restore_db; read -p "按回车继续..." ;;
+            4) list_backups; read -p "按回车继续..." ;;
+            5) check_cron; read -p "按回车继续..." ;;
+            0) echo -e "${GREEN}再见！${NC}"; exit 0 ;;
+            *) echo -e "${RED}无效选择${NC}"; sleep 1 ;;
         esac
     done
 }
