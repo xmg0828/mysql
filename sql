@@ -45,7 +45,8 @@ VPS 完整系统备份和恢复工具
 $0 [选项]
 
 选项:
-setup           首次配置备份参数
+quickstart      一键快速配置（推荐新手）
+setup           手动配置备份参数
 backup          执行完整备份
 restore         从备份恢复系统
 list            列出所有备份
@@ -54,11 +55,118 @@ schedule        设置自动备份计划
 help            显示此帮助信息
 
 示例:
-$0 setup        # 首次运行，配置备份参数
+$0 quickstart   # 一键配置并立即备份
 $0 backup       # 执行备份
 $0 restore      # 恢复系统
 
 EOF
+}
+
+# 一键快速配置
+
+quickstart_config() {
+log_info “开始一键配置备份系统…”
+
+```
+# 自动检测MySQL
+local MYSQL_INSTALLED="n"
+local MYSQL_ROOT_PASS=""
+if command -v mysql &> /dev/null || command -v mysqld &> /dev/null; then
+    MYSQL_INSTALLED="y"
+    log_info "检测到MySQL/MariaDB"
+    echo ""
+    read -sp "请输入MySQL root密码（直接回车跳过数据库备份）: " MYSQL_ROOT_PASS
+    echo ""
+    if [[ -z "$MYSQL_ROOT_PASS" ]]; then
+        MYSQL_INSTALLED="n"
+        log_warn "跳过MySQL备份"
+    fi
+fi
+
+# 自动检测PostgreSQL
+local POSTGRES_INSTALLED="n"
+if command -v psql &> /dev/null || command -v postgres &> /dev/null; then
+    POSTGRES_INSTALLED="y"
+    log_info "检测到PostgreSQL"
+fi
+
+# 自动检测Web目录
+local EXTRA_DIRS=""
+if [[ -d "/var/www" ]]; then
+    EXTRA_DIRS="/var/www"
+    log_info "检测到网站目录: /var/www"
+fi
+if [[ -d "/opt" ]]; then
+    if [[ -n "$EXTRA_DIRS" ]]; then
+        EXTRA_DIRS="$EXTRA_DIRS,/opt"
+    else
+        EXTRA_DIRS="/opt"
+    fi
+    log_info "检测到应用目录: /opt"
+fi
+
+# 生成默认配置
+cat > "$CONFIG_FILE" << EOF
+```
+
+# VPS 备份系统配置文件（一键配置生成）
+
+# 生成时间: $(date)
+
+# 本地备份配置
+
+BACKUP_DIR=”/backup”
+RETENTION_DAYS=7
+
+# 远程备份配置（默认关闭，可稍后手动配置）
+
+REMOTE_ENABLED=false
+REMOTE_METHOD=””
+
+# 备份目录配置
+
+EXTRA_DIRS=”$EXTRA_DIRS”
+EXCLUDE_DIRS=”/tmp,/var/cache,/var/log”
+
+# 数据库配置
+
+BACKUP_MYSQL=”$MYSQL_INSTALLED”
+MYSQL_ROOT_PASS=”$MYSQL_ROOT_PASS”
+BACKUP_POSTGRES=”$POSTGRES_INSTALLED”
+
+EOF
+
+```
+chmod 600 "$CONFIG_FILE"
+
+# 创建备份目录
+mkdir -p /backup
+
+log_info "配置文件已创建: $CONFIG_FILE"
+echo ""
+echo -e "${GREEN}配置摘要:${NC}"
+echo "  备份目录: /backup"
+echo "  保留天数: 7天"
+echo "  额外目录: ${EXTRA_DIRS:-无}"
+echo "  MySQL备份: $MYSQL_INSTALLED"
+echo "  PostgreSQL备份: $POSTGRES_INSTALLED"
+echo "  远程备份: 关闭（可后续配置）"
+echo ""
+
+# 安装依赖
+install_dependencies
+
+log_info "一键配置完成！"
+echo ""
+read -p "是否立即执行第一次备份？(y/n): " do_backup
+if [[ "$do_backup" == "y" ]]; then
+    echo ""
+    do_backup
+else
+    log_info "稍后可运行: vps-backup backup"
+fi
+```
+
 }
 
 # 首次配置
@@ -723,6 +831,9 @@ fi
 
 ```
 case "${1:-help}" in
+    quickstart)
+        quickstart_config
+        ;;
     setup)
         setup_config
         ;;
