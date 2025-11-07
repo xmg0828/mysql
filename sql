@@ -1,305 +1,758 @@
 #!/bin/bash
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+##############################################
 
-show_menu() {
-    clear
-    echo -e "${BLUE}=====================================${NC}"
-    echo -e "${BLUE}    MySQL备份恢复工具${NC}"
-    echo -e "${BLUE}=====================================${NC}"
-    echo ""
-    echo "1. 安装自动备份"
-    echo "2. 立即备份"
-    echo "3. 恢复数据库"
-    echo "4. 查看备份"
-    echo "5. 查看定时任务"
-    echo "0. 退出"
-    echo ""
-    echo -e "${BLUE}=====================================${NC}"
+# VPS 完整系统备份和恢复脚本
+
+# 功能: 系统快照、配置备份、远程上传、自动恢复
+
+##############################################
+
+set -e
+
+# 颜色定义
+
+RED=’\033[0;31m’
+GREEN=’\033[0;32m’
+YELLOW=’\033[1;33m’
+NC=’\033[0m’ # No Color
+
+# 配置文件路径
+
+CONFIG_FILE=”/etc/vps-backup.conf”
+
+# 日志函数
+
+log_info() {
+echo -e “${GREEN}[INFO]${NC} $(date ‘+%Y-%m-%d %H:%M:%S’) - $1”
 }
 
-detect_mysql() {
-    IS_DOCKER=false
-    MYSQL_CONTAINER=""
+log_warn() {
+echo -e “${YELLOW}[WARN]${NC} $(date ‘+%Y-%m-%d %H:%M:%S’) - $1”
+}
+
+log_error() {
+echo -e “${RED}[ERROR]${NC} $(date ‘+%Y-%m-%d %H:%M:%S’) - $1”
+}
+
+# 显示帮助信息
+
+show_help() {
+cat << EOF
+VPS 完整系统备份和恢复工具
+
+使用方法:
+$0 [选项]
+
+选项:
+setup           首次配置备份参数
+backup          执行完整备份
+restore         从备份恢复系统
+list            列出所有备份
+upload          手动上传备份到远程
+schedule        设置自动备份计划
+help            显示此帮助信息
+
+示例:
+$0 setup        # 首次运行，配置备份参数
+$0 backup       # 执行备份
+$0 restore      # 恢复系统
+
+EOF
+}
+
+# 首次配置
+
+setup_config() {
+log_info “开始配置备份系统…”
+
+```
+echo ""
+echo "=== VPS 备份系统配置 ==="
+echo ""
+
+# 本地备份目录
+read -p "本地备份保存目录 [默认: /backup]: " BACKUP_DIR
+BACKUP_DIR=${BACKUP_DIR:-/backup}
+
+# 备份保留天数
+read -p "本地备份保留天数 [默认: 7]: " RETENTION_DAYS
+RETENTION_DAYS=${RETENTION_DAYS:-7}
+
+# 远程备份配置
+echo ""
+echo "远程备份方式:"
+echo "1) SFTP/SCP (SSH远程服务器)"
+echo "2) S3兼容对象存储 (AWS S3/阿里云OSS/腾讯云COS等)"
+echo "3) WebDAV"
+echo "4) 不使用远程备份"
+read -p "选择远程备份方式 [1-4]: " REMOTE_TYPE
+
+REMOTE_ENABLED="false"
+
+case $REMOTE_TYPE in
+    1)
+        REMOTE_METHOD="sftp"
+        REMOTE_ENABLED="true"
+        read -p "远程服务器地址: " REMOTE_HOST
+        read -p "远程服务器端口 [默认: 22]: " REMOTE_PORT
+        REMOTE_PORT=${REMOTE_PORT:-22}
+        read -p "远程服务器用户名: " REMOTE_USER
+        read -p "远程服务器路径: " REMOTE_PATH
+        read -p "SSH密钥路径 [默认: ~/.ssh/id_rsa]: " SSH_KEY
+        SSH_KEY=${SSH_KEY:-~/.ssh/id_rsa}
+        ;;
+    2)
+        REMOTE_METHOD="s3"
+        REMOTE_ENABLED="true"
+        read -p "S3 Endpoint (如: s3.amazonaws.com): " S3_ENDPOINT
+        read -p "S3 Bucket 名称: " S3_BUCKET
+        read -p "S3 Access Key: " S3_ACCESS_KEY
+        read -sp "S3 Secret Key: " S3_SECRET_KEY
+        echo ""
+        read -p "S3 Region [默认: us-east-1]: " S3_REGION
+        S3_REGION=${S3_REGION:-us-east-1}
+        ;;
+    3)
+        REMOTE_METHOD="webdav"
+        REMOTE_ENABLED="true"
+        read -p "WebDAV URL: " WEBDAV_URL
+        read -p "WebDAV 用户名: " WEBDAV_USER
+        read -sp "WebDAV 密码: " WEBDAV_PASS
+        echo ""
+        ;;
+    4)
+        REMOTE_ENABLED="false"
+        log_info "跳过远程备份配置"
+        ;;
+esac
+
+# 要备份的额外目录
+echo ""
+read -p "需要备份的额外目录 (逗号分隔，如: /var/www,/opt/app): " EXTRA_DIRS
+
+# 要排除的目录
+read -p "需要排除的目录 (逗号分隔，如: /tmp,/var/cache): " EXCLUDE_DIRS
+
+# 是否备份数据库
+echo ""
+read -p "是否备份MySQL/MariaDB数据库? (y/n): " BACKUP_MYSQL
+if [[ "$BACKUP_MYSQL" == "y" ]]; then
+    read -p "MySQL root密码: " MYSQL_ROOT_PASS
+fi
+
+read -p "是否备份PostgreSQL数据库? (y/n): " BACKUP_POSTGRES
+
+# 生成配置文件
+cat > "$CONFIG_FILE" << EOF_CONFIG
+```
+
+# VPS 备份系统配置文件
+
+# 生成时间: $(date)
+
+# 本地备份配置
+
+BACKUP_DIR=”$BACKUP_DIR”
+RETENTION_DAYS=$RETENTION_DAYS
+
+# 远程备份配置
+
+REMOTE_ENABLED=$REMOTE_ENABLED
+REMOTE_METHOD=”$REMOTE_METHOD”
+
+EOF_CONFIG
+
+```
+if [[ "$REMOTE_ENABLED" == "true" ]]; then
+    case $REMOTE_METHOD in
+        sftp)
+            cat >> "$CONFIG_FILE" << EOF_CONFIG
+```
+
+# SFTP配置
+
+REMOTE_HOST=”$REMOTE_HOST”
+REMOTE_PORT=$REMOTE_PORT
+REMOTE_USER=”$REMOTE_USER”
+REMOTE_PATH=”$REMOTE_PATH”
+SSH_KEY=”$SSH_KEY”
+
+EOF_CONFIG
+;;
+s3)
+cat >> “$CONFIG_FILE” << EOF_CONFIG
+
+# S3配置
+
+S3_ENDPOINT=”$S3_ENDPOINT”
+S3_BUCKET=”$S3_BUCKET”
+S3_ACCESS_KEY=”$S3_ACCESS_KEY”
+S3_SECRET_KEY=”$S3_SECRET_KEY”
+S3_REGION=”$S3_REGION”
+
+EOF_CONFIG
+;;
+webdav)
+cat >> “$CONFIG_FILE” << EOF_CONFIG
+
+# WebDAV配置
+
+WEBDAV_URL=”$WEBDAV_URL”
+WEBDAV_USER=”$WEBDAV_USER”
+WEBDAV_PASS=”$WEBDAV_PASS”
+
+EOF_CONFIG
+;;
+esac
+fi
+
+```
+cat >> "$CONFIG_FILE" << EOF_CONFIG
+```
+
+# 备份目录配置
+
+EXTRA_DIRS=”$EXTRA_DIRS”
+EXCLUDE_DIRS=”$EXCLUDE_DIRS”
+
+# 数据库配置
+
+BACKUP_MYSQL=”$BACKUP_MYSQL”
+MYSQL_ROOT_PASS=”$MYSQL_ROOT_PASS”
+BACKUP_POSTGRES=”$BACKUP_POSTGRES”
+
+EOF_CONFIG
+
+```
+chmod 600 "$CONFIG_FILE"
+
+# 创建备份目录
+mkdir -p "$BACKUP_DIR"
+
+log_info "配置已保存到 $CONFIG_FILE"
+log_info "备份目录: $BACKUP_DIR"
+
+# 安装必要的工具
+install_dependencies
+
+log_info "配置完成！现在可以运行: $0 backup"
+```
+
+}
+
+# 安装依赖
+
+install_dependencies() {
+log_info “检查并安装必要的工具…”
+
+```
+if command -v apt-get &> /dev/null; then
+    apt-get update -qq
+    apt-get install -y rsync tar gzip pigz pv curl &> /dev/null || true
     
-    if command -v docker &> /dev/null; then
-        MYSQL_CONTAINER=$(docker ps --format "{{.Names}}" | grep -i mysql | head -1)
-        if [ -n "$MYSQL_CONTAINER" ]; then
-            IS_DOCKER=true
-            echo -e "${GREEN}检测到Docker MySQL容器: $MYSQL_CONTAINER${NC}"
-            return 0
+    if [[ "$REMOTE_METHOD" == "s3" ]]; then
+        apt-get install -y awscli &> /dev/null || {
+            log_warn "无法通过apt安装awscli，尝试使用pip..."
+            apt-get install -y python3-pip &> /dev/null
+            pip3 install awscli &> /dev/null || log_error "AWS CLI安装失败"
+        }
+    fi
+    
+    if [[ "$REMOTE_METHOD" == "webdav" ]]; then
+        apt-get install -y cadaver &> /dev/null || log_warn "WebDAV客户端安装失败"
+    fi
+    
+elif command -v yum &> /dev/null; then
+    yum install -y rsync tar gzip pigz pv curl &> /dev/null || true
+    
+    if [[ "$REMOTE_METHOD" == "s3" ]]; then
+        yum install -y awscli &> /dev/null || {
+            yum install -y python3-pip &> /dev/null
+            pip3 install awscli &> /dev/null || log_error "AWS CLI安装失败"
+        }
+    fi
+fi
+
+log_info "依赖安装完成"
+```
+
+}
+
+# 加载配置
+
+load_config() {
+if [[ ! -f “$CONFIG_FILE” ]]; then
+log_error “配置文件不存在，请先运行: $0 setup”
+exit 1
+fi
+
+```
+source "$CONFIG_FILE"
+```
+
+}
+
+# 执行备份
+
+do_backup() {
+load_config
+
+```
+local TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+local BACKUP_NAME="vps_backup_${TIMESTAMP}"
+local BACKUP_PATH="${BACKUP_DIR}/${BACKUP_NAME}"
+
+log_info "开始备份: $BACKUP_NAME"
+
+mkdir -p "$BACKUP_PATH"
+
+# 1. 备份系统信息
+log_info "收集系统信息..."
+mkdir -p "${BACKUP_PATH}/system_info"
+
+uname -a > "${BACKUP_PATH}/system_info/uname.txt"
+cat /etc/os-release > "${BACKUP_PATH}/system_info/os-release.txt" 2>/dev/null || true
+df -h > "${BACKUP_PATH}/system_info/disk_usage.txt"
+free -h > "${BACKUP_PATH}/system_info/memory.txt"
+ip addr > "${BACKUP_PATH}/system_info/network.txt"
+dpkg -l > "${BACKUP_PATH}/system_info/packages.txt" 2>/dev/null || rpm -qa > "${BACKUP_PATH}/system_info/packages.txt" 2>/dev/null || true
+systemctl list-units > "${BACKUP_PATH}/system_info/services.txt" 2>/dev/null || true
+
+# 2. 备份关键配置文件
+log_info "备份系统配置..."
+mkdir -p "${BACKUP_PATH}/etc"
+
+rsync -a --exclude='shadow*' --exclude='gshadow*' \
+    /etc/ "${BACKUP_PATH}/etc/" 2>/dev/null || true
+
+# 3. 备份用户数据
+log_info "备份用户数据..."
+
+if [[ -d /home ]]; then
+    rsync -a /home/ "${BACKUP_PATH}/home/" 2>/dev/null || true
+fi
+
+if [[ -d /root ]]; then
+    rsync -a /root/ "${BACKUP_PATH}/root/" 2>/dev/null || true
+fi
+
+# 4. 备份额外目录
+if [[ -n "$EXTRA_DIRS" ]]; then
+    log_info "备份额外目录..."
+    IFS=',' read -ra DIRS <<< "$EXTRA_DIRS"
+    for dir in "${DIRS[@]}"; do
+        dir=$(echo "$dir" | xargs) # 去除空格
+        if [[ -d "$dir" ]]; then
+            log_info "备份: $dir"
+            local target_dir="${BACKUP_PATH}/extra$(dirname "$dir")"
+            mkdir -p "$target_dir"
+            rsync -a "$dir" "$target_dir/" 2>/dev/null || true
         fi
-    fi
-    
-    if command -v mysql &> /dev/null; then
-        echo -e "${GREEN}检测到本地MySQL${NC}"
-        return 0
-    fi
-    
-    echo -e "${RED}错误: 未检测到MySQL${NC}"
-    return 1
-}
-
-install_backup() {
-    echo -e "${YELLOW}开始安装自动备份...${NC}\n"
-    
-    if ! detect_mysql; then
-        exit 1
-    fi
-    
-    read -p "MySQL用户名 [root]: " USER
-    USER=${USER:-root}
-    read -sp "MySQL密码: " PASS
-    echo ""
-    read -p "保留天数 [7]: " DAYS
-    DAYS=${DAYS:-7}
-    read -p "每天几点备份(0-23) [2]: " HOUR
-    HOUR=${HOUR:-2}
-    
-    if [ "$IS_DOCKER" = true ]; then
-        cat > /usr/local/bin/mysql-backup << EOFSCRIPT
-#!/bin/bash
-USER="$USER"
-PASS="$PASS"
-DIR="/var/backups/mysql"
-DAYS=$DAYS
-CONTAINER="$MYSQL_CONTAINER"
-
-mkdir -p "\$DIR"
-FILE="\$DIR/backup_\$(date +%Y%m%d_%H%M%S).sql"
-
-docker exec \$CONTAINER mysqldump -u "\$USER" -p"\$PASS" --all-databases > "\$FILE" 2>/dev/null
-
-if [ \$? -eq 0 ] && [ -s "\$FILE" ]; then
-    gzip "\$FILE"
-    SIZE=\$(du -h "\${FILE}.gz" | cut -f1)
-    echo "备份成功: \${FILE}.gz (\$SIZE)"
-    find "\$DIR" -name "*.sql.gz" -mtime +\$DAYS -delete
-else
-    echo "备份失败"
-    rm -f "\$FILE"
-    exit 1
-fi
-EOFSCRIPT
-    else
-        cat > /usr/local/bin/mysql-backup << EOFSCRIPT
-#!/bin/bash
-USER="$USER"
-PASS="$PASS"
-DIR="/var/backups/mysql"
-DAYS=$DAYS
-
-mkdir -p "\$DIR"
-FILE="\$DIR/backup_\$(date +%Y%m%d_%H%M%S).sql"
-
-if [ -z "\$PASS" ]; then
-    mysqldump -u "\$USER" --all-databases > "\$FILE" 2>/dev/null
-else
-    mysqldump -u "\$USER" -p"\$PASS" --all-databases > "\$FILE" 2>/dev/null
-fi
-
-if [ \$? -eq 0 ] && [ -s "\$FILE" ]; then
-    gzip "\$FILE"
-    SIZE=\$(du -h "\${FILE}.gz" | cut -f1)
-    echo "备份成功: \${FILE}.gz (\$SIZE)"
-    find "\$DIR" -name "*.sql.gz" -mtime +\$DAYS -delete
-else
-    echo "备份失败"
-    rm -f "\$FILE"
-    exit 1
-fi
-EOFSCRIPT
-    fi
-    
-    chmod 755 /usr/local/bin/mysql-backup
-    chown root:root /usr/local/bin/mysql-backup
-    
-    if [ ! -x /usr/local/bin/mysql-backup ]; then
-        echo -e "${RED}权限设置失败，正在修复...${NC}"
-        chmod 755 /usr/local/bin/mysql-backup
-    fi
-    
-    (crontab -l 2>/dev/null | grep -v mysql-backup; echo "0 $HOUR * * * /usr/local/bin/mysql-backup >> /var/log/mysql-backup.log 2>&1") | crontab -
-    
-    echo -e "\n${GREEN}✓ 安装完成${NC}"
-    echo -e "${YELLOW}每天 ${HOUR}:00 自动备份${NC}"
-    echo -e "${YELLOW}备份目录: /var/backups/mysql${NC}"
-    echo -e "${YELLOW}保留天数: ${DAYS}天${NC}\n"
-    
-    read -p "立即测试备份? [Y/n]: " TEST
-    if [[ ! "$TEST" =~ ^[Nn]$ ]]; then
-        echo -e "${YELLOW}正在测试备份...${NC}\n"
-        /usr/local/bin/mysql-backup
-    fi
-}
-
-backup_now() {
-    echo -e "${YELLOW}正在备份...${NC}\n"
-    
-    if [ -f /usr/local/bin/mysql-backup ]; then
-        /usr/local/bin/mysql-backup
-    else
-        echo -e "${RED}错误: 请先安装自动备份(选项1)${NC}"
-    fi
-}
-
-restore_db() {
-    DIR="/var/backups/mysql"
-    
-    if [ ! -d "$DIR" ] || [ -z "$(ls -A $DIR/*.sql.gz 2>/dev/null)" ]; then
-        echo -e "${RED}错误: 没有找到备份文件${NC}"
-        return
-    fi
-    
-    if ! detect_mysql; then
-        return
-    fi
-    
-    echo -e "${YELLOW}可用的备份文件:${NC}\n"
-    files=($DIR/backup_*.sql.gz)
-    for i in "${!files[@]}"; do
-        name=$(basename "${files[$i]}")
-        size=$(du -h "${files[$i]}" | cut -f1)
-        time=$(stat -c %y "${files[$i]}" | cut -d. -f1)
-        echo "$((i+1)). $name ($size) - $time"
     done
+fi
+
+# 5. 备份数据库
+if [[ "$BACKUP_MYSQL" == "y" ]]; then
+    log_info "备份MySQL数据库..."
+    mkdir -p "${BACKUP_PATH}/databases/mysql"
     
-    echo ""
-    read -p "选择要恢复的备份 (输入编号): " choice
-    
-    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#files[@]}" ]; then
-        file="${files[$((choice-1))]}"
+    if command -v mysqldump &> /dev/null; then
+        databases=$(mysql -u root -p"$MYSQL_ROOT_PASS" -e "SHOW DATABASES;" 2>/dev/null | grep -Ev "(Database|information_schema|performance_schema|mysql|sys)")
         
-        echo -e "\n${RED}警告: 恢复将覆盖当前所有数据库！${NC}"
-        read -p "确认恢复? 输入YES继续: " confirm
-        
-        if [ "$confirm" = "YES" ]; then
-            read -sp "MySQL密码: " PASS
-            echo ""
-            echo -e "${YELLOW}正在恢复数据库...${NC}"
-            
-            if [ "$IS_DOCKER" = true ]; then
-                gunzip < "$file" | docker exec -i $MYSQL_CONTAINER mysql -u root -p"$PASS" 2>/dev/null
-            else
-                if [ -z "$PASS" ]; then
-                    gunzip < "$file" | mysql
-                else
-                    gunzip < "$file" | mysql -p"$PASS"
-                fi
-            fi
-            
-            if [ $? -eq 0 ]; then
-                echo -e "${GREEN}✓ 恢复成功！${NC}"
-            else
-                echo -e "${RED}✗ 恢复失败${NC}"
-            fi
-        else
-            echo -e "${YELLOW}已取消恢复${NC}"
-        fi
-    else
-        echo -e "${RED}无效的选择${NC}"
+        for db in $databases; do
+            log_info "备份数据库: $db"
+            mysqldump -u root -p"$MYSQL_ROOT_PASS" --single-transaction --routines --triggers "$db" 2>/dev/null | \
+                pigz > "${BACKUP_PATH}/databases/mysql/${db}.sql.gz" || true
+        done
     fi
+fi
+
+if [[ "$BACKUP_POSTGRES" == "y" ]]; then
+    log_info "备份PostgreSQL数据库..."
+    mkdir -p "${BACKUP_PATH}/databases/postgresql"
+    
+    if command -v pg_dumpall &> /dev/null; then
+        sudo -u postgres pg_dumpall 2>/dev/null | \
+            pigz > "${BACKUP_PATH}/databases/postgresql/all_databases.sql.gz" || true
+    fi
+fi
+
+# 6. 备份crontab
+log_info "备份计划任务..."
+mkdir -p "${BACKUP_PATH}/crontabs"
+crontab -l > "${BACKUP_PATH}/crontabs/root_crontab.txt" 2>/dev/null || true
+cp -r /etc/cron.* "${BACKUP_PATH}/crontabs/" 2>/dev/null || true
+
+# 7. 创建恢复脚本
+log_info "创建恢复脚本..."
+cat > "${BACKUP_PATH}/RESTORE.sh" << 'EOF_RESTORE'
+```
+
+#!/bin/bash
+
+# VPS 系统恢复脚本
+
+# 自动生成
+
+set -e
+
+echo “=== VPS 系统恢复 ===”
+echo “警告: 此操作将恢复系统配置，可能覆盖当前文件”
+read -p “确定要继续吗? (yes/no): “ confirm
+
+if [[ “$confirm” != “yes” ]]; then
+echo “取消恢复”
+exit 0
+fi
+
+BACKUP_DIR=$(dirname “$(readlink -f “$0”)”)
+
+echo “[1/5] 恢复系统配置…”
+rsync -a “${BACKUP_DIR}/etc/” /etc/ 2>/dev/null || true
+
+echo “[2/5] 恢复用户数据…”
+rsync -a “${BACKUP_DIR}/home/” /home/ 2>/dev/null || true
+rsync -a “${BACKUP_DIR}/root/” /root/ 2>/dev/null || true
+
+echo “[3/5] 恢复额外目录…”
+if [[ -d “${BACKUP_DIR}/extra” ]]; then
+rsync -a “${BACKUP_DIR}/extra/” / 2>/dev/null || true
+fi
+
+echo “[4/5] 恢复数据库…”
+if [[ -d “${BACKUP_DIR}/databases/mysql” ]]; then
+read -sp “MySQL root密码: “ mysql_pass
+echo “”
+for sql_file in “${BACKUP_DIR}/databases/mysql”/*.sql.gz; do
+if [[ -f “$sql_file” ]]; then
+db_name=$(basename “$sql_file” .sql.gz)
+echo “恢复数据库: $db_name”
+mysql -u root -p”$mysql_pass” -e “CREATE DATABASE IF NOT EXISTS $db_name;” 2>/dev/null
+gunzip < “$sql_file” | mysql -u root -p”$mysql_pass” “$db_name” 2>/dev/null || true
+fi
+done
+fi
+
+if [[ -f “${BACKUP_DIR}/databases/postgresql/all_databases.sql.gz” ]]; then
+echo “恢复PostgreSQL数据库…”
+gunzip < “${BACKUP_DIR}/databases/postgresql/all_databases.sql.gz” | sudo -u postgres psql 2>/dev/null || true
+fi
+
+echo “[5/5] 恢复计划任务…”
+if [[ -f “${BACKUP_DIR}/crontabs/root_crontab.txt” ]]; then
+crontab “${BACKUP_DIR}/crontabs/root_crontab.txt” 2>/dev/null || true
+fi
+
+echo “”
+echo “恢复完成！”
+echo “建议重启系统以确保所有更改生效: reboot”
+EOF_RESTORE
+
+```
+chmod +x "${BACKUP_PATH}/RESTORE.sh"
+
+# 8. 创建备份信息文件
+cat > "${BACKUP_PATH}/BACKUP_INFO.txt" << EOF
+```
+
+# 备份信息
+
+备份时间: $(date)
+主机名: $(hostname)
+操作系统: $(cat /etc/os-release | grep PRETTY_NAME | cut -d’”’ -f2)
+备份大小: 计算中…
+
+备份内容:
+
+- 系统配置 (/etc)
+- 用户数据 (/home, /root)
+- 额外目录: $EXTRA_DIRS
+- MySQL数据库: $BACKUP_MYSQL
+- PostgreSQL数据库: $BACKUP_POSTGRES
+
+恢复方法:
+
+1. 解压此备份文件
+1. 运行: bash RESTORE.sh
+   ========================================
+   EOF
+   
+   # 9. 压缩备份
+   
+   log_info “压缩备份文件…”
+   local ARCHIVE_NAME=”${BACKUP_NAME}.tar.gz”
+   
+   cd “$BACKUP_DIR”
+   tar czf “$ARCHIVE_NAME” “$BACKUP_NAME” 2>/dev/null ||   
+   tar cf - “$BACKUP_NAME” | pigz > “$ARCHIVE_NAME”
+   
+   local BACKUP_SIZE=$(du -h “${ARCHIVE_NAME}” | cut -f1)
+   log_info “备份完成: ${ARCHIVE_NAME} (${BACKUP_SIZE})”
+   
+   # 更新备份信息
+   
+   sed -i “s/备份大小: 计算中…/备份大小: ${BACKUP_SIZE}/” “${BACKUP_PATH}/BACKUP_INFO.txt”
+   
+   # 10. 上传到远程
+   
+   if [[ “$REMOTE_ENABLED” == “true” ]]; then
+   upload_backup “$ARCHIVE_NAME”
+   fi
+   
+   # 11. 清理旧备份
+   
+   log_info “清理旧备份…”
+   find “$BACKUP_DIR” -name “vps_backup_*.tar.gz” -mtime +$RETENTION_DAYS -delete 2>/dev/null || true
+   find “$BACKUP_DIR” -name “vps_backup_*” -type d -mtime +$RETENTION_DAYS -exec rm -rf {} + 2>/dev/null || true
+   
+   # 删除临时目录
+   
+   rm -rf “$BACKUP_PATH”
+   
+   log_info “备份流程完成！”
+   echo “”
+   echo “备份文件: ${BACKUP_DIR}/${ARCHIVE_NAME}”
+   echo “备份大小: ${BACKUP_SIZE}”
+   }
+
+# 上传备份到远程
+
+upload_backup() {
+local ARCHIVE_NAME=”$1”
+local ARCHIVE_PATH=”${BACKUP_DIR}/${ARCHIVE_NAME}”
+
+```
+log_info "开始上传备份到远程..."
+
+case $REMOTE_METHOD in
+    sftp)
+        log_info "使用SFTP上传..."
+        scp -P "$REMOTE_PORT" -i "$SSH_KEY" "$ARCHIVE_PATH" \
+            "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}/" && \
+            log_info "上传成功！" || log_error "上传失败"
+        ;;
+    s3)
+        log_info "使用S3上传..."
+        export AWS_ACCESS_KEY_ID="$S3_ACCESS_KEY"
+        export AWS_SECRET_ACCESS_KEY="$S3_SECRET_KEY"
+        
+        aws s3 cp "$ARCHIVE_PATH" \
+            "s3://${S3_BUCKET}/${ARCHIVE_NAME}" \
+            --endpoint-url "https://${S3_ENDPOINT}" \
+            --region "$S3_REGION" && \
+            log_info "上传成功！" || log_error "上传失败"
+        ;;
+    webdav)
+        log_info "使用WebDAV上传..."
+        curl -u "${WEBDAV_USER}:${WEBDAV_PASS}" \
+            -T "$ARCHIVE_PATH" \
+            "${WEBDAV_URL}/${ARCHIVE_NAME}" && \
+            log_info "上传成功！" || log_error "上传失败"
+        ;;
+esac
+```
+
 }
+
+# 列出所有备份
 
 list_backups() {
-    DIR="/var/backups/mysql"
+load_config
+
+```
+log_info "本地备份列表:"
+echo ""
+
+if [[ -d "$BACKUP_DIR" ]]; then
+    ls -lh "${BACKUP_DIR}"/vps_backup_*.tar.gz 2>/dev/null | \
+        awk '{print $9, "(" $5 ")", $6, $7, $8}' || \
+        log_warn "没有找到本地备份"
+fi
+
+echo ""
+
+if [[ "$REMOTE_ENABLED" == "true" ]]; then
+    log_info "远程备份列表:"
+    echo ""
     
-    if [ ! -d "$DIR" ]; then
-        echo -e "${RED}备份目录不存在${NC}"
-        return
-    fi
-    
-    echo -e "${YELLOW}备份文件列表:${NC}\n"
-    
-    files=($DIR/backup_*.sql.gz)
-    
-    if [ ${#files[@]} -eq 0 ] || [ ! -e "${files[0]}" ]; then
-        echo -e "${RED}没有备份文件${NC}"
-        return
-    fi
-    
-    total=0
-    for file in "${files[@]}"; do
-        name=$(basename "$file")
-        size=$(du -h "$file" | cut -f1)
-        bytes=$(du -b "$file" | cut -f1)
-        time=$(stat -c %y "$file" | cut -d. -f1)
-        echo "📦 $name"
-        echo "   大小: $size | 时间: $time"
-        echo ""
-        total=$((total + bytes))
-    done
-    
-    total_mb=$(echo $total | awk '{printf "%.2f MB", $1/1024/1024}')
-    echo -e "${YELLOW}总计: ${#files[@]} 个备份文件, 共 $total_mb${NC}"
+    case $REMOTE_METHOD in
+        sftp)
+            ssh -p "$REMOTE_PORT" -i "$SSH_KEY" \
+                "${REMOTE_USER}@${REMOTE_HOST}" \
+                "ls -lh ${REMOTE_PATH}/vps_backup_*.tar.gz" 2>/dev/null || \
+                log_warn "无法列出远程备份"
+            ;;
+        s3)
+            export AWS_ACCESS_KEY_ID="$S3_ACCESS_KEY"
+            export AWS_SECRET_ACCESS_KEY="$S3_SECRET_KEY"
+            
+            aws s3 ls "s3://${S3_BUCKET}/" \
+                --endpoint-url "https://${S3_ENDPOINT}" \
+                --region "$S3_REGION" | grep "vps_backup_" || \
+                log_warn "无法列出远程备份"
+            ;;
+    esac
+fi
+```
+
 }
 
-check_cron() {
-    echo -e "${YELLOW}定时任务状态:${NC}\n"
-    
-    if crontab -l 2>/dev/null | grep -q mysql-backup; then
-        echo -e "${GREEN}✓ 定时任务已启用${NC}\n"
-        echo "当前配置:"
-        crontab -l | grep mysql-backup
-        echo ""
-        echo -e "${YELLOW}最近的备份日志:${NC}"
-        if [ -f /var/log/mysql-backup.log ]; then
-            tail -n 10 /var/log/mysql-backup.log
-        else
-            echo "暂无日志"
-        fi
-    else
-        echo -e "${RED}✗ 定时任务未设置${NC}"
-        echo "请先运行选项1进行安装"
-    fi
+# 设置自动备份
+
+schedule_backup() {
+log_info “设置自动备份计划…”
+
+```
+echo ""
+echo "选择备份频率:"
+echo "1) 每天凌晨2点"
+echo "2) 每周日凌晨2点"
+echo "3) 每月1号凌晨2点"
+echo "4) 自定义"
+read -p "选择 [1-4]: " schedule_choice
+
+case $schedule_choice in
+    1)
+        CRON_SCHEDULE="0 2 * * *"
+        ;;
+    2)
+        CRON_SCHEDULE="0 2 * * 0"
+        ;;
+    3)
+        CRON_SCHEDULE="0 2 1 * *"
+        ;;
+    4)
+        read -p "输入cron表达式 (如: 0 2 * * *): " CRON_SCHEDULE
+        ;;
+    *)
+        log_error "无效选择"
+        exit 1
+        ;;
+esac
+
+local SCRIPT_PATH=$(readlink -f "$0")
+local CRON_CMD="$CRON_SCHEDULE $SCRIPT_PATH backup >> /var/log/vps-backup.log 2>&1"
+
+# 移除旧的备份任务
+crontab -l 2>/dev/null | grep -v "vps-backup" | crontab - 2>/dev/null || true
+
+# 添加新任务
+(crontab -l 2>/dev/null; echo "$CRON_CMD") | crontab -
+
+log_info "自动备份已设置: $CRON_SCHEDULE"
+log_info "日志文件: /var/log/vps-backup.log"
+```
+
 }
+
+# 恢复系统
+
+do_restore() {
+load_config
+
+```
+log_info "可用的备份文件:"
+echo ""
+
+local backups=($(ls -t "${BACKUP_DIR}"/vps_backup_*.tar.gz 2>/dev/null))
+
+if [[ ${#backups[@]} -eq 0 ]]; then
+    log_error "没有找到备份文件"
+    exit 1
+fi
+
+for i in "${!backups[@]}"; do
+    local size=$(du -h "${backups[$i]}" | cut -f1)
+    echo "$((i+1))) $(basename ${backups[$i]}) - $size"
+done
+
+echo ""
+read -p "选择要恢复的备份 [1-${#backups[@]}]: " choice
+
+if [[ $choice -lt 1 || $choice -gt ${#backups[@]} ]]; then
+    log_error "无效选择"
+    exit 1
+fi
+
+local selected_backup="${backups[$((choice-1))]}"
+
+echo ""
+log_warn "警告: 恢复操作将覆盖当前系统配置！"
+read -p "确定要继续吗? (yes/no): " confirm
+
+if [[ "$confirm" != "yes" ]]; then
+    log_info "取消恢复"
+    exit 0
+fi
+
+log_info "开始恢复: $(basename $selected_backup)"
+
+local RESTORE_DIR="/tmp/vps_restore_$$"
+mkdir -p "$RESTORE_DIR"
+
+log_info "解压备份..."
+tar xzf "$selected_backup" -C "$RESTORE_DIR"
+
+local BACKUP_FOLDER=$(ls "$RESTORE_DIR")
+
+if [[ -f "${RESTORE_DIR}/${BACKUP_FOLDER}/RESTORE.sh" ]]; then
+    log_info "执行恢复脚本..."
+    bash "${RESTORE_DIR}/${BACKUP_FOLDER}/RESTORE.sh"
+else
+    log_error "未找到恢复脚本"
+    rm -rf "$RESTORE_DIR"
+    exit 1
+fi
+
+rm -rf "$RESTORE_DIR"
+
+log_info "恢复完成！建议重启系统。"
+```
+
+}
+
+# 主函数
 
 main() {
-    if [ "$EUID" -ne 0 ]; then 
-        echo -e "${RED}错误: 需要root权限${NC}"
-        echo "请使用: sudo $0"
-        exit 1
-    fi
-    
-    while true; do
-        show_menu
-        read -p "请选择 [0-5]: " choice
-        
-        case $choice in
-            1)
-                install_backup
-                read -p "按回车继续..."
-                ;;
-            2)
-                backup_now
-                read -p "按回车继续..."
-                ;;
-            3)
-                restore_db
-                read -p "按回车继续..."
-                ;;
-            4)
-                list_backups
-                read -p "按回车继续..."
-                ;;
-            5)
-                check_cron
-                read -p "按回车继续..."
-                ;;
-            0)
-                echo -e "${GREEN}再见！${NC}"
-                exit 0
-                ;;
-            *)
-                echo -e "${RED}无效的选择${NC}"
-                sleep 1
-                ;;
-        esac
-    done
+# 检查root权限
+if [[ $EUID -ne 0 ]]; then
+log_error “此脚本需要root权限运行”
+exit 1
+fi
+
+```
+case "${1:-help}" in
+    setup)
+        setup_config
+        ;;
+    backup)
+        do_backup
+        ;;
+    restore)
+        do_restore
+        ;;
+    list)
+        list_backups
+        ;;
+    upload)
+        load_config
+        read -p "输入要上传的备份文件名: " filename
+        if [[ -f "${BACKUP_DIR}/${filename}" ]]; then
+            upload_backup "$filename"
+        else
+            log_error "文件不存在"
+        fi
+        ;;
+    schedule)
+        schedule_backup
+        ;;
+    help|*)
+        show_help
+        ;;
+esac
+```
+
 }
 
-main
+main “$@”
